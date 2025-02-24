@@ -1,19 +1,15 @@
-import express from 'express';
-import mysql from 'mysql2/promise';
-import helmet from 'helmet';
-import cors from 'cors';
-import bodyParser from 'body-parser';
-import { ethers } from 'ethers';
-import dotenv from 'dotenv';
-import path from 'path';
-import schedule from 'node-schedule';
-import { v4 } from 'uuid';
-import fetch from 'node-fetch';
-import { dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);  // Get the full file path
-const __dirname = dirname(__filename);  // Get the directory path
+const express = require('express');
+const mysql = require('mysql2/promise');
+const helmet = require('helmet');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const { ethers } = require('ethers');
+const dotenv = require('dotenv');
+const path = require('path');
+const schedule = require('node-schedule');
+const { v4 } = require('uuid');
+const { dirname } = require('path');
+const { fileURLToPath } = require('url');
 
 dotenv.config({ path: path.join(__dirname, '/.env') });
 
@@ -67,9 +63,7 @@ app.use(helmet({
 
 app.use(cors({
   credentials: true,
-  origin: [
-    process.env.APP_URL,
-  ],
+  origin: true, // Allows all origins
   optionsSuccessStatus: 200 // some legacy browsers (IE11, various SmartTVs) choke on 204
 }));
 
@@ -77,20 +71,68 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 // app.use(express.static('build'));
 
+let apiDomain = {};
+function getApiDomain(req) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader.split(' ')[1];
+  return apiDomain[token];
+}
+
+async function reloadApiKeys() {
+  apiDomain = {};
+  const [results] = await pool.query('SELECT * FROM app_api_key', []);
+  results.forEach(r => apiDomain[r.api_key] = r.domain);
+}
+
+async function reloadFrameJson(domain) {
+  try {
+    let response = null;
+    try {
+      response = await fetch(`https://${domain}/.well-known/farcaster.json`, {
+        method: "GET",
+      });
+    } catch (e) {
+      throw new Error('Unable to fetch /.well-known/farcaster.json');
+    }
+    let json = null;
+    try {
+      json = await response.json();
+    } catch (e) {
+      throw new Error('Unable to parse /.well-known/farcaster.json');
+    }
+    if (!json.frame || !json.frame.name) {
+      throw new Error('Missing metadata in /.well-known/farcaster.json');
+    }
+    await pool.query(
+      `
+      INSERT INTO app (domain, frame_json, last_check_attempt, last_check_success)
+      VALUES (?,?,NOW(),NOW())
+      ON DUPLICATE KEY UPDATE
+        frame_json = VALUES(frame_json),
+        last_check_attempt = NOW(),
+        last_check_success = NOW()
+      `,
+      [ domain, JSON.stringify(json.frame) ]
+    );
+    return json.frame;
+  } catch (e) {
+    await pool.query(
+      `
+      UPDATE app SET last_check_attempt = NOW() WHERE domain = ?
+      `,
+      [ domain ]
+    );
+    throw e;
+  }
+}
+
 app.use((req, res, next) => {
   if (req.originalUrl.indexOf('/v1') == 0) {
-    // Get the Authorization header
-    const authHeader = req.headers['authorization'];
-    // Check if it exists and starts with 'Bearer '
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized - Missing API Key' });
-    }
-
-    // Extract the token (remove 'Bearer ' prefix)
-    const token = authHeader.split(' ')[1];
-    if (token != process.env.APP_API_KEY) {
+    const domain = getApiDomain(req);
+    if (!domain) {
       return res.status(401).json({ error: 'Unauthorized - Invalid API Key' });
     }
+    req.apiDomain = domain;
   }
   next();
 });
@@ -99,29 +141,76 @@ app.get('/status', (req, res) => {
   jsonResponse(res, null, { status: "OK"});
 });
 
+app.get('/reload/keys', (req, res) => {
+  reloadApiKeys();
+  jsonResponse(res, null, { status: "OK"});
+});
+
+app.get('/reload/app/:domain', async (req, res) => {
+  const domain = req.params.domain || '';
+  if (domain.length == 0) {
+    jsonResponse(res, new Error('Missing domain'));
+  } else {
+    try {
+      const frame = await reloadFrameJson(domain);
+      jsonResponse(res, null, frame);
+    } catch (e) {
+      jsonResponse(res, e);
+    }
+  }
+});
+
+app.get('/app/:domain', async (req, res) => {
+  const domain = req.params.domain || '';
+  try {
+    if (domain.length == 0) {
+      throw new Error("Missing domain");
+    } else {
+      const [results] = await pool.query(
+        `
+        SELECT *
+        FROM app
+        WHERE domain = ?
+        `,
+        [ domain ]
+      );
+      if (results.length == 0) {
+        const frame = await reloadFrameJson(domain);
+        jsonResponse(res, null, frame);
+      } else {
+        jsonResponse(res, null, JSON.parse(results[0].frame_json));
+      }
+    }
+  } catch (e) {
+    jsonResponse(res, e, null);
+  }
+});
+
 app.get('/v1/notification_target', async (req, res) => {
-  // const contractAddress = (req.query.contractAddress || '').toLowerCase();
   const fid = req.query.fid || '-1';
   const [targets] = await pool.query(
     `
-    SELECT * FROM notification_target WHERE fid = ?
+    SELECT *, endpoint AS url
+    FROM notification_target
+    WHERE fid = ? AND domain = ?
     `,
-    [ fid ]
+    [ fid, req.apiDomain ]
   );
   jsonResponse(res, null, targets.length > 0 ? targets[0] : null);
 });
 
 app.post('/v1/notification_target', async (req, res) => {
-  const { fid, token, url } = req.body;
+  const { apiKey, fid, token, endpoint } = req.body;
   try {
     await pool.query(
       `
-      INSERT INTO notification_target (fid, url, token) VALUES (?,?,?)
+      INSERT INTO notification_target (domain, fid, endpoint, token)
+      VALUES (?,?,?,?)
       ON DUPLICATE KEY UPDATE
         active = TRUE,
         token = VALUES(token)
       `,
-      [ fid, url, token ]
+      [ req.apiDomain, fid, endpoint, token ]
     );
     jsonResponse(res, null, 'OK');
   } catch (e) {
@@ -134,9 +223,11 @@ app.delete('/v1/notification_target', async (req, res) => {
   try {
     await pool.query(
       `
-      UPDATE notification_target SET active = FALSE WHERE fid = ?
+      UPDATE notification_target
+      SET active = FALSE
+      WHERE fid = ? AND domain = ?
       `,
-      [ fid ]
+      [ fid, req.apiDomain ]
     );
     jsonResponse(res, null, 'OK');
   } catch (e) {
@@ -146,6 +237,8 @@ app.delete('/v1/notification_target', async (req, res) => {
 
 const CRON_MIN = '* * * * *';
 // schedule.scheduleJob(CRON_MIN, fn);
+
+reloadApiKeys();
 
 app.listen(port, () => {
   console.log(`Listening on ${port}`);
