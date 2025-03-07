@@ -10,6 +10,8 @@ const schedule = require('node-schedule');
 const { v4 } = require('uuid');
 const { dirname } = require('path');
 const { fileURLToPath } = require('url');
+const { JsonRpcProvider } = require('ethers');
+const farstoreAbi = require('./abi/farstore.json');
 
 dotenv.config({ path: path.join(__dirname, '/.env') });
 
@@ -27,6 +29,10 @@ const pool = mysql.createPool({
 
 const app = express();
 const port = process.env.SERVER_PORT;
+
+// Connect to the Base network
+const provider = new JsonRpcProvider(process.env.BASE_JSON_RPC_URL);
+const farstoreContract = new ethers.Contract(process.env.FARSTORE_CONTRACT, farstoreAbi, provider);
 
 function jsonResponse(res, error, results) {
   if (error) {
@@ -84,7 +90,8 @@ async function reloadApiKeys() {
   results.forEach(r => apiDomain[r.api_key] = r.domain);
 }
 
-async function reloadFrameJson(domain) {
+async function reloadFrameJson(rawDomain) {
+  const domain = rawDomain.toLowerCase();
   try {
     let response = null;
     try {
@@ -94,6 +101,7 @@ async function reloadFrameJson(domain) {
     } catch (e) {
       throw new Error('Unable to fetch /.well-known/farcaster.json');
     }
+    let frameId = (await farstoreContract.getId(domain)) || null;
     let json = null;
     try {
       json = await response.json();
@@ -105,14 +113,15 @@ async function reloadFrameJson(domain) {
     }
     await pool.query(
       `
-      INSERT INTO app (domain, frame_json, last_check_attempt, last_check_success)
-      VALUES (?,?,NOW(),NOW())
+      INSERT INTO app (frame_id, domain, frame_json, last_check_attempt, last_check_success)
+      VALUES (?,?,?,NOW(),NOW())
       ON DUPLICATE KEY UPDATE
+        frame_id = VALUES(frame_id),
         frame_json = VALUES(frame_json),
         last_check_attempt = NOW(),
         last_check_success = NOW()
       `,
-      [ domain, JSON.stringify(json.frame) ]
+      [ frameId, domain, JSON.stringify(json.frame) ]
     );
     return json.frame;
   } catch (e) {
@@ -127,7 +136,7 @@ async function reloadFrameJson(domain) {
 }
 
 app.use((req, res, next) => {
-  if (req.originalUrl.indexOf('/v1') == 0) {
+  if (req.originalUrl.indexOf('/private') == 0) {
     const domain = getApiDomain(req);
     if (!domain) {
       return res.status(401).json({ error: 'Unauthorized - Invalid API Key' });
@@ -160,6 +169,16 @@ app.get('/reload/app/:domain', async (req, res) => {
   }
 });
 
+app.get('/reload/apps', async (req, res) => {
+  const numAppsRes = await farstoreContract.getNumListedFrames();
+  const numApps = Number(numAppsRes);
+  for (let i = 1; i <= numApps; i++) {
+    const domain = await farstoreContract.getDomain(i);
+    await reloadFrameJson(domain);
+  }
+  jsonResponse(res, null, { status: `Reloaded ${numApps} apps`});
+});
+
 app.get('/app/:domain', async (req, res) => {
   const domain = req.params.domain || '';
   try {
@@ -186,7 +205,34 @@ app.get('/app/:domain', async (req, res) => {
   }
 });
 
-app.get('/v1/notification_target', async (req, res) => {
+app.get('/apps', async (req, res) => {
+  const frameIds = (req.query.frameIds || '').toLowerCase().split(',');
+  try {
+    if (frameIds.length == 0) {
+      throw new Error("Missing frameIds");
+    } else if (frameIds.length > 20) {
+      throw new Error("Max 20 frameIds");
+    } else {
+      const [results] = await pool.query(
+        `
+        SELECT *
+        FROM app
+        WHERE frame_id IN (${repeat('?', frameIds.length)})
+        `,
+        frameIds
+      );
+      jsonResponse(res, null, results.map(r => ({
+        domain: r.domain,
+        frameId: r.frame_id,
+        frame: JSON.parse(r.frame_json)
+      })));
+    }
+  } catch (e) {
+    jsonResponse(res, e, null);
+  }
+});
+
+app.get('/private/notification_target', async (req, res) => {
   const fid = req.query.fid || '-1';
   const [targets] = await pool.query(
     `
@@ -199,7 +245,7 @@ app.get('/v1/notification_target', async (req, res) => {
   jsonResponse(res, null, targets.length > 0 ? targets[0] : null);
 });
 
-app.post('/v1/notification_target', async (req, res) => {
+app.post('/private/notification_target', async (req, res) => {
   const { apiKey, fid, token, endpoint } = req.body;
   try {
     await pool.query(
@@ -218,7 +264,7 @@ app.post('/v1/notification_target', async (req, res) => {
   }
 });
 
-app.delete('/v1/notification_target', async (req, res) => {
+app.delete('/private/notification_target', async (req, res) => {
   const { fid } = req.body;
   try {
     await pool.query(
