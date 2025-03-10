@@ -84,13 +84,7 @@ function getApiDomain(req) {
   return apiDomain[token];
 }
 
-async function reloadApiKeys() {
-  apiDomain = {};
-  const [results] = await pool.query('SELECT * FROM app_api_key', []);
-  results.forEach(r => apiDomain[r.api_key] = r.domain);
-}
-
-async function reloadFrameJson(rawDomain) {
+async function reloadFrame(rawDomain) {
   const domain = rawDomain.toLowerCase();
   try {
     let response = null;
@@ -99,17 +93,17 @@ async function reloadFrameJson(rawDomain) {
         method: "GET",
       });
     } catch (e) {
-      throw new Error('Unable to fetch /.well-known/farcaster.json');
+      throw new Error(`Unable to fetch https://${domain}/.well-known/farcaster.json`);
     }
     let frameId = (await farstoreContract.getId(domain)) || null;
     let json = null;
     try {
       json = await response.json();
     } catch (e) {
-      throw new Error('Unable to parse /.well-known/farcaster.json');
+      throw new Error(`Unable to parse https://${domain}/.well-known/farcaster.json`);
     }
     if (!json.frame || !json.frame.name) {
-      throw new Error('Missing metadata in /.well-known/farcaster.json');
+      throw new Error(`Missing metadata in https://${domain}/.well-known/farcaster.json`);
     }
     await pool.query(
       `
@@ -150,33 +144,18 @@ app.get('/status', (req, res) => {
   jsonResponse(res, null, { status: "OK"});
 });
 
-app.get('/reload/keys', (req, res) => {
-  reloadApiKeys();
-  jsonResponse(res, null, { status: "OK"});
-});
-
 app.get('/reload/app/:domain', async (req, res) => {
   const domain = req.params.domain || '';
   if (domain.length == 0) {
     jsonResponse(res, new Error('Missing domain'));
   } else {
     try {
-      const frame = await reloadFrameJson(domain);
+      const frame = await reloadFrame(domain);
       jsonResponse(res, null, frame);
     } catch (e) {
       jsonResponse(res, e);
     }
   }
-});
-
-app.get('/reload/apps', async (req, res) => {
-  const numAppsRes = await farstoreContract.getNumListedFrames();
-  const numApps = Number(numAppsRes);
-  for (let i = 1; i <= numApps; i++) {
-    const domain = await farstoreContract.getDomain(i);
-    await reloadFrameJson(domain);
-  }
-  jsonResponse(res, null, { status: `Reloaded ${numApps} apps`});
 });
 
 app.get('/app/:domain', async (req, res) => {
@@ -194,7 +173,7 @@ app.get('/app/:domain', async (req, res) => {
         [ domain ]
       );
       if (results.length == 0) {
-        const frame = await reloadFrameJson(domain);
+        const frame = await reloadFrame(domain);
         jsonResponse(res, null, frame);
       } else {
         jsonResponse(res, null, JSON.parse(results[0].frame_json));
@@ -281,9 +260,46 @@ app.delete('/private/notification_target', async (req, res) => {
   }
 });
 
-const CRON_MIN = '* * * * *';
-// schedule.scheduleJob(CRON_MIN, fn);
+const syncApps = async () => {
+  const chainMax = await farstoreContract.getNumListedFrames();
+  const [result] = await pool.query('SELECT COALESCE(MAX(frame_id), 0) AS dbMax FROM app');
+  const dbMax = result[0].dbMax;
+  for (let i = dbMax + 1; i <= Number(chainMax); i++) {
+    const domain = await farstoreContract.getDomain(i);
+    await reloadFrame(domain);
+  }
+}
 
+const resyncApps = async () => {
+  const chainMax = await farstoreContract.getNumListedFrames();
+  const [result] = await pool.query(
+    `
+    SELECT frame_id
+    FROM app
+    WHERE frame_id IS NOT NULL
+    ORDER BY last_check_attempt DESC
+    LIMIT 10
+    `
+  );
+  for (let i = 0; i < result.length; i++) {
+    const domain = await farstoreContract.getDomain(result[i].frame_id);
+    await reloadFrame(domain);
+  }
+}
+
+const reloadApiKeys = async () => {
+  const [results] = await pool.query('SELECT * FROM app_api_key');
+  apiDomain = {};
+  results.forEach(r => apiDomain[r.api_key] = r.domain);
+}
+
+const CRON_MIN = '* * * * *';
+schedule.scheduleJob(CRON_MIN, syncApps);
+schedule.scheduleJob(CRON_MIN, resyncApps);
+schedule.scheduleJob(CRON_MIN, reloadApiKeys);
+
+syncApps();
+resyncApps();
 reloadApiKeys();
 
 app.listen(port, () => {
