@@ -185,10 +185,21 @@ app.get('/app/:domain', async (req, res) => {
 });
 
 app.get('/apps', async (req, res) => {
-  const frameIds = (req.query.frameIds || '').toLowerCase().split(',');
+  const frameIds = req.query.frameIds ? req.query.frameIds.split(',') : [];
   try {
     if (frameIds.length == 0) {
-      throw new Error("Missing frameIds");
+      const [results] = await pool.query(
+        `
+        SELECT *
+        FROM app
+        WHERE frame_id IS NOT NULL
+        `,
+      );
+      jsonResponse(res, null, results.map(r => ({
+        domain: r.domain,
+        frameId: r.frame_id,
+        frame: JSON.parse(r.frame_json)
+      })));
     } else if (frameIds.length > 20) {
       throw new Error("Max 20 frameIds");
     } else {
@@ -277,13 +288,17 @@ const resyncApps = async () => {
     SELECT frame_id
     FROM app
     WHERE frame_id IS NOT NULL
-    ORDER BY last_check_attempt DESC
+    ORDER BY last_check_attempt ASC
     LIMIT 10
     `
   );
   for (let i = 0; i < result.length; i++) {
     const domain = await farstoreContract.getDomain(result[i].frame_id);
-    await reloadFrame(domain);
+    try {
+      await reloadFrame(domain);
+    } catch (e) {
+      console.log(`Unable to resync domain: ${domain}`);
+    }
   }
 }
 
