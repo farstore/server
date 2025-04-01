@@ -117,7 +117,10 @@ async function reloadFrame(rawDomain) {
       `,
       [ frameId, domain, JSON.stringify(json.frame) ]
     );
-    return json.frame;
+    return {
+      frameId: frameId,
+      frame: json.frame,
+    }
   } catch (e) {
     await pool.query(
       `
@@ -150,8 +153,12 @@ app.get('/reload/app/:domain', async (req, res) => {
     jsonResponse(res, new Error('Missing domain'));
   } else {
     try {
-      const frame = await reloadFrame(domain);
-      jsonResponse(res, null, frame);
+      const { frame, frameId } = await reloadFrame(domain);
+      jsonResponse(res, null, {
+        domain,
+        frame,
+        frameId,
+      });
     } catch (e) {
       jsonResponse(res, e);
     }
@@ -173,10 +180,19 @@ app.get('/app/:domain', async (req, res) => {
         [ domain ]
       );
       if (results.length == 0) {
-        const frame = await reloadFrame(domain);
-        jsonResponse(res, null, frame);
+        const { frame, frameId } = await reloadFrame(domain);
+        jsonResponse(res, null, {
+          domain,
+          frame,
+          frameId,
+        });
       } else {
-        jsonResponse(res, null, JSON.parse(results[0].frame_json));
+        const r = results[0];
+        jsonResponse(res, null, {
+          domain: r.domain,
+          frameId: r.frame_id,
+          frame: JSON.parse(r.frame_json)
+        });
       }
     }
   } catch (e) {
