@@ -257,6 +257,18 @@ app.get('/tokens', async (req, res) => {
   jsonResponse(res, null, LIQUIDITY_CACHE);
 });
 
+app.get('/private/notification_target/active', async (req, res) => {
+  const [targets] = await pool.query(
+    `
+    SELECT *, endpoint AS url
+    FROM notification_target
+    WHERE domain = ? AND active = TRUE
+    `,
+    [ req.apiDomain ]
+  );
+  jsonResponse(res, null, targets);
+});
+
 app.get('/private/notification_target', async (req, res) => {
   const fid = req.query.fid || '-1';
   const [targets] = await pool.query(
