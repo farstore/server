@@ -87,7 +87,7 @@ let LIQUIDITY_CACHE = {};
 let API_DOMAIN_CACHE = {};
 
 function getApiDomain(req) {
-  const authHeader = req.headers['authorization'];
+  const authHeader = req.headers['authorization'] || '';
   const token = authHeader.split(' ')[1];
   return API_DOMAIN_CACHE[token];
 }
