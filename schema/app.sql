@@ -1,7 +1,6 @@
 CREATE TABLE `app` (
     `id`                            int NOT NULL AUTO_INCREMENT,
     `domain`                        varchar(255) NOT NULL,
-    `frame_id`                      int default NULL,
     `frame_json`                    text NOT NULL,
     `last_check_attempt`            datetime DEFAULT NOW(),
     `last_check_success`            datetime DEFAULT NOW(),

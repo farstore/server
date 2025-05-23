@@ -12,6 +12,7 @@ const { dirname } = require('path');
 const { fileURLToPath } = require('url');
 const { JsonRpcProvider } = require('ethers');
 const farstoreAbi = require('./abi/farstore.json');
+const farstoreBatchReadAbi = require('./abi/farstore-batch-read.json');
 const uniswapV3FactoryAbi = require('./abi/uniswap-v3-factory.json');
 const erc20Abi = require('./abi/erc-20.json');
 
@@ -37,6 +38,7 @@ const WETH = '0x4200000000000000000000000000000000000006';
 const UNISWAP_V3_FACTORY = '0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
 const provider = new JsonRpcProvider(process.env.BASE_JSON_RPC_URL);
 const farstoreContract = new ethers.Contract(process.env.FARSTORE_CONTRACT, farstoreAbi, provider);
+const farstoreBatchReadContract = new ethers.Contract(process.env.FARSTORE_BATCH_READ_CONTRACT, farstoreBatchReadAbi, provider);
 const uniswapV3FactoryContract = new ethers.Contract(UNISWAP_V3_FACTORY, uniswapV3FactoryAbi, provider);
 const wethContract = new ethers.Contract(WETH, erc20Abi, provider);
 
@@ -83,7 +85,7 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 // app.use(express.static('build'));
 
-let LIQUIDITY_CACHE = {};
+let ONCHAIN_DATA_CACHE = {};
 let API_DOMAIN_CACHE = {};
 
 function getApiDomain(req) {
@@ -92,14 +94,15 @@ function getApiDomain(req) {
   return API_DOMAIN_CACHE[token];
 }
 
-function getToken(frameId) {
-  return LIQUIDITY_CACHE[frameId] || {
+function getOnchainMetadata(domain) {
+  return ONCHAIN_DATA_CACHE[domain] || {
     token: null,
     liquidity: 0.0,
+    owner: '0x0000000000000000000000000000000000000000'
   }
 }
 
-async function reloadFrame(rawDomain) {
+async function syncApp(rawDomain) {
   const domain = rawDomain.toLowerCase();
   try {
     let response = null;
@@ -110,7 +113,6 @@ async function reloadFrame(rawDomain) {
     } catch (e) {
       throw new Error(`Unable to fetch https://${domain}/.well-known/farcaster.json`);
     }
-    let frameId = (await farstoreContract.getId(domain)) || null;
     let json = null;
     try {
       json = await response.json();
@@ -122,20 +124,16 @@ async function reloadFrame(rawDomain) {
     }
     await pool.query(
       `
-      INSERT INTO app (frame_id, domain, frame_json, last_check_attempt, last_check_success)
-      VALUES (?,?,?,NOW(),NOW())
+      INSERT INTO app (domain, frame_json, last_check_attempt, last_check_success)
+      VALUES (?,?,NOW(),NOW())
       ON DUPLICATE KEY UPDATE
-        frame_id = VALUES(frame_id),
         frame_json = VALUES(frame_json),
         last_check_attempt = NOW(),
         last_check_success = NOW()
       `,
-      [ frameId, domain, JSON.stringify(json.frame) ]
+      [ domain, JSON.stringify(json.frame) ]
     );
-    return {
-      frameId: frameId,
-      frame: json.frame,
-    }
+    return json.frame;
   } catch (e) {
     await pool.query(
       `
@@ -168,7 +166,7 @@ app.get('/reload/app/:domain', async (req, res) => {
     jsonResponse(res, new Error('Missing domain'));
   } else {
     try {
-      await reloadFrame(domain);
+      await syncApp(domain);
       jsonResponse(res, null, "OK");
     } catch (e) {
       jsonResponse(res, e);
@@ -191,20 +189,18 @@ app.get('/app/:domain', async (req, res) => {
         [ domain ]
       );
       if (results.length == 0) {
-        const { frame, frameId } = await reloadFrame(domain);
+        const frame = await syncApp(domain);
         jsonResponse(res, null, {
           domain,
           frame,
-          frameId,
-          ...getToken(frameId),
+          ...getOnchainMetadata(domain),
         });
       } else {
         const r = results[0];
         jsonResponse(res, null, {
           domain: r.domain,
-          frameId: r.frame_id,
           frame: JSON.parse(r.frame_json),
-          ...getToken(r.frame_id),
+          ...getOnchainMetadata(domain),
         });
       }
     }
@@ -214,47 +210,38 @@ app.get('/app/:domain', async (req, res) => {
 });
 
 app.get('/apps', async (req, res) => {
-  const frameIds = req.query.frameIds ? req.query.frameIds.split(',') : [];
+  const numApps = await farstoreContract.getAppCounter();
   try {
-    if (frameIds.length == 0) {
-      const [results] = await pool.query(
-        `
-        SELECT *
-        FROM app
-        WHERE frame_id IS NOT NULL
-        `,
-      );
-      jsonResponse(res, null, results.map(r => ({
-        domain: r.domain,
-        frameId: r.frame_id,
-        frame: JSON.parse(r.frame_json),
-        ...getToken(r.frame_id),
-      })));
-    } else if (frameIds.length > 20) {
-      throw new Error("Max 20 frameIds");
+    if (numApps > 0n) {
+      const [domains, hidden] = await farstoreBatchReadContract.getDomainsAndHidden(1, numApps);
+      const visibleDomains = domains.filter((d, i) => !hidden[i]);
+      if (visibleDomains.length > 0) {
+        const [results] = await pool.query(
+          `
+          SELECT *
+          FROM app
+          WHERE domain IN (${repeat('?', visibleDomains.length)})
+          `,
+          visibleDomains
+        );
+        jsonResponse(res, null, results.map(r => ({
+          domain: r.domain,
+          frame: JSON.parse(r.frame_json),
+          ...getOnchainMetadata(r.domain),
+        })));
+      } else {
+        jsonResponse(res, null, []);
+      }
     } else {
-      const [results] = await pool.query(
-        `
-        SELECT *
-        FROM app
-        WHERE frame_id IN (${repeat('?', frameIds.length)})
-        `,
-        frameIds
-      );
-      jsonResponse(res, null, results.map(r => ({
-        domain: r.domain,
-        frameId: r.frame_id,
-        frame: JSON.parse(r.frame_json),
-        ...getToken(r.frame_id),
-      })));
+      jsonResponse(res, null, []);
     }
   } catch (e) {
     jsonResponse(res, e, null);
   }
 });
 
-app.get('/tokens', async (req, res) => {
-  jsonResponse(res, null, LIQUIDITY_CACHE);
+app.get('/onchain-metadata', async (req, res) => {
+  jsonResponse(res, null, ONCHAIN_DATA_CACHE);
 });
 
 app.get('/private/notification_target/active', async (req, res) => {
@@ -318,54 +305,45 @@ app.delete('/private/notification_target', async (req, res) => {
   }
 });
 
-const syncApps = async () => {
-  const chainMax = await farstoreContract.getNumListedFrames();
-  const [result] = await pool.query('SELECT COALESCE(MAX(frame_id), 0) AS dbMax FROM app');
-  const dbMax = result[0].dbMax;
-  for (let i = dbMax + 1; i <= Number(chainMax); i++) {
-    const domain = await farstoreContract.getDomain(i);
-    await reloadFrame(domain);
-  }
-}
-
 const resyncApps = async () => {
-  const chainMax = await farstoreContract.getNumListedFrames();
-  const [result] = await pool.query(
-    `
-    SELECT frame_id
-    FROM app
-    WHERE frame_id IS NOT NULL
-    ORDER BY last_check_attempt ASC
-    LIMIT 10
-    `
-  );
-  for (let i = 0; i < result.length; i++) {
-    const domain = await farstoreContract.getDomain(result[i].frame_id);
+  const numApps = await farstoreContract.getAppCounter();
+  const [domains, hidden] = await farstoreBatchReadContract.getDomainsAndHidden(1, numApps);
+  for (let i = 0; i < domains.length; i++) {
     try {
-      await reloadFrame(domain);
+      console.log(`resyncing domain: ${domains[i]}`);
+      await syncApp(domains[i]);
     } catch (e) {
-      console.log(`Unable to resync domain: ${domain}`);
+      console.log(`Unable to resync domain: ${domains[i]}`);
     }
   }
 }
 
-const syncLiquidity = async () => {
+const syncOnchainData = async () => {
   const results = [];
-  const tokens = await farstoreContract.getListedTokens();
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
-    const frameId = Number(await farstoreContract.getTokenFrame(token));
-    const pool = await uniswapV3FactoryContract.getPool(token, WETH, 10000);
-    const liquidity = parseFloat(ethers.formatEther((await wethContract.balanceOf(pool)).toString()));
-    results.push({
-      frameId,
-      token,
-      liquidity,
-    });
+  const numApps = await farstoreContract.getAppCounter();
+  for (let i = 1; i <= numApps; i++) {
+    const { domain, token, owner } = await farstoreContract.getAppDestructured(i);
+    if (token == '0x0000000000000000000000000000000000000000') {
+      results.push({
+        domain,
+        owner,
+        token: null,
+        liquidity: 0.0,
+      });
+    } else {
+      const pool = await uniswapV3FactoryContract.getPool(token, WETH, 10000);
+      const liquidity = parseFloat(ethers.formatEther((await wethContract.balanceOf(pool)).toString()));
+      results.push({
+        domain,
+        owner,
+        token,
+        liquidity,
+      });
+    }
   }
-  LIQUIDITY_CACHE = {};
+  ONCHAIN_DATA_CACHE = {};
   for (let i = 0; i < results.length; i++) {
-    LIQUIDITY_CACHE[results[i].frameId] = results[i];
+    ONCHAIN_DATA_CACHE[results[i].domain] = results[i];
   }
 }
 
@@ -376,15 +354,13 @@ const reloadApiKeys = async () => {
 }
 
 const CRON_MIN = '* * * * *';
-schedule.scheduleJob(CRON_MIN, syncApps);
 schedule.scheduleJob(CRON_MIN, resyncApps);
 schedule.scheduleJob(CRON_MIN, reloadApiKeys);
-schedule.scheduleJob(CRON_MIN, syncLiquidity);
+schedule.scheduleJob(CRON_MIN, syncOnchainData);
 
-syncApps();
 resyncApps();
 reloadApiKeys();
-syncLiquidity();
+syncOnchainData();
 
 app.listen(port, () => {
   console.log(`Listening on ${port}`);
