@@ -310,12 +310,12 @@ const resyncApps = async () => {
   const [domains, hidden] = await farstoreBatchReadContract.getDomainsAndHidden(1, numApps);
   for (let i = 0; i < domains.length; i++) {
     try {
-      console.log(`resyncing domain: ${domains[i]}`);
       await syncApp(domains[i]);
     } catch (e) {
       console.log(`Unable to resync domain: ${domains[i]}`);
     }
   }
+  console.log(`resynced ${domains.length} domains`);
 }
 
 const syncOnchainData = async () => {
@@ -327,15 +327,19 @@ const syncOnchainData = async () => {
       results.push({
         domain,
         owner,
+        symbol: null,
         token: null,
         liquidity: 0.0,
       });
     } else {
+      const tokenContract = new ethers.Contract(token, erc20Abi, provider);
+      const symbol = await tokenContract.symbol();
       const pool = await uniswapV3FactoryContract.getPool(token, WETH, 10000);
       const liquidity = parseFloat(ethers.formatEther((await wethContract.balanceOf(pool)).toString()));
       results.push({
         domain,
         owner,
+        symbol,
         token,
         liquidity,
       });
@@ -353,10 +357,10 @@ const reloadApiKeys = async () => {
   results.forEach(r => API_DOMAIN_CACHE[r.api_key] = r.domain);
 }
 
-const CRON_MIN = '* * * * *';
-schedule.scheduleJob(CRON_MIN, resyncApps);
-schedule.scheduleJob(CRON_MIN, reloadApiKeys);
-schedule.scheduleJob(CRON_MIN, syncOnchainData);
+const CRON_2MIN = '*/2 * * * *';
+schedule.scheduleJob(CRON_2MIN, resyncApps);
+schedule.scheduleJob(CRON_2MIN, reloadApiKeys);
+schedule.scheduleJob(CRON_2MIN, syncOnchainData);
 
 resyncApps();
 reloadApiKeys();
