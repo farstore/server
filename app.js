@@ -15,6 +15,7 @@ const farstoreAbi = require('./abi/farstore.json');
 const farstoreBatchReadAbi = require('./abi/farstore-batch-read.json');
 const uniswapV3FactoryAbi = require('./abi/uniswap-v3-factory.json');
 const erc20Abi = require('./abi/erc-20.json');
+const launcherAbi = require('./abi/launcher.json');
 
 dotenv.config({ path: path.join(__dirname, '/.env') });
 
@@ -41,6 +42,7 @@ const farstoreContract = new ethers.Contract(process.env.FARSTORE_CONTRACT, fars
 const farstoreBatchReadContract = new ethers.Contract(process.env.FARSTORE_BATCH_READ_CONTRACT, farstoreBatchReadAbi, provider);
 const uniswapV3FactoryContract = new ethers.Contract(UNISWAP_V3_FACTORY, uniswapV3FactoryAbi, provider);
 const wethContract = new ethers.Contract(WETH, erc20Abi, provider);
+const launcherContract = new ethers.Contract(process.env.LAUNCHER_CONTRACT, launcherAbi, provider);
 
 function jsonResponse(res, error, results) {
   if (error) {
@@ -322,7 +324,9 @@ const syncOnchainData = async () => {
   const results = [];
   const numApps = await farstoreContract.getAppCounter();
   for (let i = 1; i <= numApps; i++) {
-    const { domain, token, owner } = await farstoreContract.getAppDestructured(i);
+    const { domain, token, owner, createTime } = await farstoreContract.getAppDestructured(i);
+    const fundingWei = await launcherContract.getAppFunds(i);
+    const funding = parseFloat(ethers.formatEther(fundingWei));
     if (token == '0x0000000000000000000000000000000000000000') {
       results.push({
         domain,
@@ -330,6 +334,8 @@ const syncOnchainData = async () => {
         symbol: null,
         token: null,
         liquidity: 0.0,
+        funding,
+        createTime: Number(createTime)
       });
     } else {
       const tokenContract = new ethers.Contract(token, erc20Abi, provider);
@@ -342,6 +348,8 @@ const syncOnchainData = async () => {
         symbol,
         token,
         liquidity,
+        funding,
+        createTime: Number(createTime)
       });
     }
   }
@@ -357,10 +365,11 @@ const reloadApiKeys = async () => {
   results.forEach(r => API_DOMAIN_CACHE[r.api_key] = r.domain);
 }
 
+const CRON_MIN = '* * * * *';
 const CRON_2MIN = '*/2 * * * *';
 schedule.scheduleJob(CRON_2MIN, resyncApps);
 schedule.scheduleJob(CRON_2MIN, reloadApiKeys);
-schedule.scheduleJob(CRON_2MIN, syncOnchainData);
+schedule.scheduleJob(CRON_MIN, syncOnchainData);
 
 resyncApps();
 reloadApiKeys();
