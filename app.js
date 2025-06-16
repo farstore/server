@@ -104,6 +104,41 @@ function getOnchainMetadata(domain) {
   }
 }
 
+async function getTokenEthLiquidity(token) {
+  let liquidity = 0;
+  try {
+    response = await fetch(`https://api.dexscreener.com/token-pairs/v1/base/${token}`, {
+      method: "GET",
+    });
+  } catch (e) {
+    throw new Error(`Unable to fetch liquidity for token: ${token}`);
+  }
+  let json = null;
+  try {
+    markets = await response.json();
+  } catch (e) {
+    throw new Error(`Unable to parse liquidity for token: ${token}`);
+  }
+  markets.forEach(market => {
+    if (market.baseToken.address == token) {
+      if (
+        market.quoteToken.address == '0x4200000000000000000000000000000000000006' ||
+        market.quoteToken.address == '0x0000000000000000000000000000000000000000'
+      ) {
+        liquidity += market.liquidity.quote;
+      }
+    } else if (market.quoteToken.address == token) {
+      if (
+        market.baseToken.address == '0x4200000000000000000000000000000000000006' ||
+        market.baseToken.address == '0x0000000000000000000000000000000000000000'
+      ) {
+        liquidity += market.liquidity.base;
+      }
+    }
+  });
+  return liquidity;
+}
+
 async function syncApp(rawDomain) {
   const domain = rawDomain.toLowerCase();
   try {
@@ -340,8 +375,7 @@ const syncOnchainData = async () => {
     } else {
       const tokenContract = new ethers.Contract(token, erc20Abi, provider);
       const symbol = await tokenContract.symbol();
-      const pool = await uniswapV3FactoryContract.getPool(token, WETH, 10000);
-      const liquidity = parseFloat(ethers.formatEther((await wethContract.balanceOf(pool)).toString()));
+      const liquidity = await getTokenEthLiquidity(token);
       results.push({
         domain,
         owner,
