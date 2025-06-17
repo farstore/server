@@ -125,17 +125,35 @@ async function getTokenEthLiquidity(token) {
         market.quoteToken.address == '0x4200000000000000000000000000000000000006' ||
         market.quoteToken.address == '0x0000000000000000000000000000000000000000'
       ) {
-        liquidity += market.liquidity.quote;
+        if (market.liquidity) {
+          liquidity += market.liquidity.quote;
+        }
       }
     } else if (market.quoteToken.address == token) {
       if (
         market.baseToken.address == '0x4200000000000000000000000000000000000006' ||
         market.baseToken.address == '0x0000000000000000000000000000000000000000'
       ) {
-        liquidity += market.liquidity.base;
+        if (market.liquidity) {
+          liquidity += market.liquidity.base;
+        }
       }
     }
   });
+  if (liquidity == 0) {
+    // Fetch from the chain!
+    try {
+      const liquidityWei = await farstoreBatchReadContract.getTokenEthInLp(token);
+      liquidity = parseFloat(ethers.formatEther(liquidityWei));
+    } catch (e) {
+      try {
+        const pool = await uniswapV3FactoryContract.getPool(token, WETH, 10000);
+        const liquidity = parseFloat(ethers.formatEther((await wethContract.balanceOf(pool)).toString()));
+      } catch (e) {
+        console.log('skipping lookup for', token);
+      }
+    }
+  }
   return liquidity;
 }
 
