@@ -148,7 +148,7 @@ async function getTokenEthLiquidity(token) {
     } catch (e) {
       try {
         const pool = await uniswapV3FactoryContract.getPool(token, WETH, 10000);
-        const liquidity = parseFloat(ethers.formatEther((await wethContract.balanceOf(pool)).toString()));
+        liquidity = parseFloat(ethers.formatEther((await wethContract.balanceOf(pool)).toString()));
       } catch (e) {
         console.log('skipping lookup for', token);
       }
